@@ -1,3 +1,4 @@
+import json
 import multiprocessing
 import shutil
 import statistics
@@ -6,6 +7,7 @@ import time
 import unittest
 
 import os
+import requests
 
 RESULTS = []
 
@@ -38,9 +40,12 @@ class TestFetch(unittest.TestCase):
 
     # Maybe use the pull-policy to new and avoid gci
     fetch_cmd = [dir_flag, "fetch", "--insecure-options=all", ]
+    copies = []
     fetchs = []
 
     dev_null = open("/dev/null")
+
+    result_url = os.getenv("RESULT_URL")
 
     @classmethod
     def setUpClass(cls):
@@ -52,14 +57,14 @@ class TestFetch(unittest.TestCase):
             assert os.path.isdir(d) is True
 
         for i, aci in enumerate(os.getenv("ACIS", "").split(",")):
-            assert subprocess.call([cls.rkt_official] + cls.fetch_cmd + ["--pull-policy=update", aci]) == 0
+            assert subprocess.call([cls.rkt_official] + cls.fetch_cmd + [aci]) == 0
+            fs_aci = os.path.join(cls.test_d, "acis", "%d.aci" % i)
+            tmpfs_aci = os.path.join(cls.var_lib_rkt, "%d.aci" % i)
             assert subprocess.call(
                 [cls.rkt_official, "i", "export", "--overwrite", aci,
-                 os.path.join(cls.test_d, "acis", "%d.aci" % i)]) == 0
-            shutil.copy2(os.path.join(cls.test_d, "acis", "%d.aci" % i), os.path.join(cls.var_lib_rkt, "%d.aci" % i))
-            cls.fetchs.append(
-                cls.fetch_cmd + ["--pull-policy=never", os.path.join(cls.var_lib_rkt, "%d.aci" % i)]
-            )
+                 fs_aci]) == 0
+            cls.copies.append((fs_aci, tmpfs_aci))
+            cls.fetchs.append(cls.fetch_cmd + [tmpfs_aci])
 
     @classmethod
     def tearDownClass(cls):
@@ -67,10 +72,26 @@ class TestFetch(unittest.TestCase):
         cls.dev_null.close()
         print("\nSummary:")
         RESULTS.sort(key=lambda x: x.total)
+        results_to_send = []
         for i, r in enumerate(RESULTS):
             print(
                 "%d%% -> %s" % (
                     ((RESULTS[0].total * 100) / RESULTS[i].total), RESULTS[i].__name__)
+            )
+            results_to_send.append(
+                r.__dict__
+            )
+        data = json.dumps(
+            results_to_send
+        )
+        if cls.result_url:
+            req = requests.post(cls.result_url, data, headers={'Content-Type': 'application/json'})
+            req.close()
+            print(
+                "\n",
+                cls.result_url,
+                ": ",
+                req.status_code
             )
 
     def gc(self):
@@ -82,7 +103,9 @@ class TestFetch(unittest.TestCase):
                         stdout=self.dev_null, stderr=self.dev_null)
 
     def setUp(self):
-        self.assertEqual(0, subprocess.call(["mount", "-t", "tmpfs", "-o", "size=10G", "tmpfs", self.var_lib_rkt]))
+        self.assertEqual(0, subprocess.call(["mount", "-t", "tmpfs", "-o", "size=20G", "tmpfs", self.var_lib_rkt]))
+        for fs, tmpfs in self.copies:
+            shutil.copy2(fs, tmpfs)
         self.gc()
         self.gci()
 
@@ -91,14 +114,20 @@ class TestFetch(unittest.TestCase):
         self.gci()
         self.assertEqual(0, subprocess.call(["umount", self.var_lib_rkt], stderr=self.dev_null))
 
-    def fetch(self, test_name: str, rkt: str, gomaxprocs=1, iterations=3):
+    def fetch(self, test_name: str, rkt: str, gomaxprocs=1, iterations=10):
         result = []
         cmds = [[rkt] + k for k in self.fetchs]
         env = {"GOMAXPROCS": "%d" % gomaxprocs}
+        for c in cmds:
+            print(c)
         for i in range(iterations):
             before = time.time()
             for c in cmds:
-                subprocess.call(c, env=env, stdout=self.dev_null, stderr=self.dev_null)
+                subprocess.call(
+                    c,
+                    env=env,
+                    stdout=self.dev_null,
+                )
             result.append(time.time() - before)
             self.gci()
         testing_result = Result(test_name, result)
@@ -116,14 +145,14 @@ class TestFetch(unittest.TestCase):
             "deviation: ", testing_result.deviation, "\n",
             end="\n")
 
-    def test_00_patch_gomaxprocs_1(self):
-        self.fetch(self.test_00_patch_gomaxprocs_1.__name__, self.rkt_patched)
+    def test_patch_gomaxprocs_1(self):
+        self.fetch(self.test_patch_gomaxprocs_1.__name__, self.rkt_patched)
 
-    def test_00_patch_gomaxprocs_max(self):
-        self.fetch(self.test_00_patch_gomaxprocs_max.__name__, self.rkt_patched, gomaxprocs=multiprocessing.cpu_count())
+    def test_patch_gomaxprocs_max(self):
+        self.fetch(self.test_patch_gomaxprocs_max.__name__, self.rkt_patched, gomaxprocs=multiprocessing.cpu_count())
 
-    def test_01_official(self):
-        self.fetch(self.test_01_official.__name__, self.rkt_official)
+    def test_official(self):
+        self.fetch(self.test_official.__name__, self.rkt_official)
 
 
 if __name__ == '__main__':
